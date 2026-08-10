@@ -6,11 +6,12 @@
 #include "types.hpp"
 
 constexpr uint32_t MAX_ROPES = 10;
-constexpr uint32_t MAX_SEGMENTS_PER_ROPE = 64;
+constexpr uint32_t MAX_SEGMENTS_PER_ROPE = 128;
 
 struct RopeConstraint {
-    uint32_t p1, p2; // indices into positions[]
+    uint32_t p1, p2; // local indices within a rope
     float restLength;
+    float lambda = 0.0f; // accumulated XPBD multiplier, reset each substep
 };
 
 struct RopeStore {

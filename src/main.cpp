@@ -1,9 +1,17 @@
 #include <SDL3/SDL.h>
-#include <algorithm>
+#include <chrono>
 
-#include "scene.hpp"
+#include "input.hpp"
+#include "physics.hpp"
 #include "renderer.hpp"
 #include "rope.hpp"
+#include "scene.hpp"
+
+using Clock    = std::chrono::steady_clock;
+using Duration = std::chrono::duration<float>;
+
+constexpr float FIXED_DT            = 1.0f / 60.0f;
+constexpr int   MAX_STEPS_PER_FRAME = 5;
 
 int main(int, char **) {
   if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -11,28 +19,34 @@ int main(int, char **) {
     return 1;
   }
 
-  SDL_Window *window = SDL_CreateWindow("Snake", 1280, 720, SDL_WINDOW_RESIZABLE);
-  SDL_Renderer *ren = SDL_CreateRenderer(window, nullptr);
+  SDL_Window   *window = SDL_CreateWindow("Snake", 1280, 720, SDL_WINDOW_RESIZABLE);
+  SDL_Renderer *ren    = SDL_CreateRenderer(window, nullptr);
 
   Scene scene;
   InitRopeStore(scene.ropes);
 
-  Camera cam{{0.0f, 0.0f}, 1.0f};
+  Camera     cam{{0.0f, 0.0f}, 1.0f};
+  InputState input;
 
-  // Spawn a rope hanging from world origin downward
-  RopeId rope0 = SpawnRope(scene.ropes, {0.0f, -150.0f}, {0.0f, 150.0f}, 20);
-  (void)rope0;
-  // Pin the anchor (first point is fixed)
-  scene.ropes.invMass[0] = 0.0f;
+  SpawnRope(scene.ropes, {-500.0f, 0.0f}, {500.0f, 0.0f}, 128);
 
-  bool running = true;
-  while (running) {
-    SDL_Event event;
-    while (SDL_PollEvent(&event)) {
-      if (event.type == SDL_EVENT_QUIT) running = false;
-      if (event.type == SDL_EVENT_KEY_DOWN &&
-          event.key.scancode == SDL_SCANCODE_ESCAPE)
-        running = false;
+  float accumulator = 0.0f;
+  auto  lastTime    = Clock::now();
+
+  while (!input.quit) {
+    auto  now       = Clock::now();
+    float frameTime = Duration(now - lastTime).count();
+    lastTime = now;
+
+    ProcessEvents(input, scene, cam, window);
+    UpdateDrag(input, scene, cam, window);
+
+    accumulator += frameTime;
+    int steps = 0;
+    while (accumulator >= FIXED_DT && steps < MAX_STEPS_PER_FRAME) {
+      StepPhysics(scene, FIXED_DT);
+      accumulator -= FIXED_DT;
+      ++steps;
     }
 
     RenderFrame(ren, scene, cam);
