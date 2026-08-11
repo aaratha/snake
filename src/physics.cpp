@@ -6,7 +6,9 @@
 static constexpr float FRICTION        = 0.99f;
 static constexpr float COMPLIANCE      = 1e-7f;
 static constexpr int   SUBSTEPS        = 8;
-static constexpr int   PIN_DAMP_RADIUS = 3;
+static constexpr int   PIN_DAMP_RADIUS  = 3;
+static constexpr int   FREE_DAMP_RADIUS = 6;   // segments from free end to damp
+static constexpr float FREE_DAMP        = 0.1f; // fraction of velocity removed per substep
 static constexpr float ROPE_RADIUS      = 6.0f;
 static constexpr int   MIN_COLL_GAP    = 5;
 static constexpr float MIN_BEND_ANGLE   = 90.0f; // degrees — max allowed bend between segments
@@ -219,10 +221,11 @@ void StepPhysics(Scene &scene, float dt) {
     SolveAngleConstraints(ropes);
     SolveRopeSelfCollisions(ropes);
 
-    // zero velocity near pins so oscillation can't build up there
     for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
       int    segs = ropes.segCount[r];
       size_t base = r * MAX_SEGMENTS_PER_ROPE;
+
+      // zero velocity near pinned points
       for (int i = 0; i < segs; ++i) {
         if (ropes.invMass[base + i] != 0.0f) continue;
         int lo = std::max(0, i - PIN_DAMP_RADIUS);
@@ -230,6 +233,19 @@ void StepPhysics(Scene &scene, float dt) {
         for (int j = lo; j <= hi; ++j)
           ropes.p_pos[base + j] = ropes.c_pos[base + j];
       }
+
+      // bleed velocity at each free endpoint so wave energy doesn't reflect and build
+      auto dampEnd = [&](int endpoint) {
+        if (ropes.invMass[base + endpoint] == 0.0f) return; // pinned, skip
+        int lo = (endpoint == 0) ? 0 : std::max(0, segs - 1 - FREE_DAMP_RADIUS);
+        int hi = (endpoint == 0) ? std::min(segs - 1, FREE_DAMP_RADIUS) : segs - 1;
+        for (int j = lo; j <= hi; ++j) {
+          ropes.p_pos[base+j].x += (ropes.c_pos[base+j].x - ropes.p_pos[base+j].x) * FREE_DAMP;
+          ropes.p_pos[base+j].y += (ropes.c_pos[base+j].y - ropes.p_pos[base+j].y) * FREE_DAMP;
+        }
+      };
+      dampEnd(0);
+      dampEnd(segs - 1);
     }
   }
 }

@@ -1,6 +1,7 @@
 #include <SDL3/SDL.h>
 #include <chrono>
 
+#include "camera.hpp"
 #include "input.hpp"
 #include "physics.hpp"
 #include "renderer.hpp"
@@ -28,15 +29,18 @@ int main(int, char **) {
   Camera     cam{{0.0f, 0.0f}, 1.0f};
   InputState input;
 
-  SpawnRope(scene.ropes, {-500.0f, 0.0f}, {500.0f, 0.0f}, 128);
+  SpawnRope(scene.ropes, {-500.0f, 0.0f}, {500.0f, 0.0f}, 64);
 
   float accumulator = 0.0f;
+  float smoothFps   = 0.0f;
   auto  lastTime    = Clock::now();
 
   while (!input.quit) {
     auto  now       = Clock::now();
     float frameTime = Duration(now - lastTime).count();
     lastTime = now;
+    if (frameTime > 0.0f)
+      smoothFps += (1.0f / frameTime - smoothFps) * 0.1f;
 
     ProcessEvents(input, scene, cam, window);
     UpdateDrag(input, scene, cam, window);
@@ -49,7 +53,11 @@ int main(int, char **) {
       ++steps;
     }
 
-    RenderFrame(ren, scene, cam);
+    int wi, hi;
+    SDL_GetWindowSize(window, &wi, &hi);
+    UpdateCamera(cam, scene.ropes, input, (float)wi, (float)hi);
+
+    RenderFrame(ren, scene, cam, smoothFps);
   }
 
   SDL_DestroyRenderer(ren);
