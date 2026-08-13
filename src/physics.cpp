@@ -29,6 +29,7 @@ consteval float cos_deg(float deg) {
 
 static constexpr float MIN_BEND_COS     = cos_deg(MIN_BEND_ANGLE);
 static constexpr float MAX_BODY_VELOCITY = 30.0f; // world units per substep
+static constexpr float ALIGNMENT         = 0.15f; // fraction of velocity to align toward neighbors per substep
 
 void IntegrateRopePositions(RopeStore &ropes, float /*dt*/) {
   for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
@@ -290,6 +291,34 @@ void SolveRopeConstraints(RopeStore &ropes, float dt) {
   }
 }
 
+static void AlignVelocities(RopeStore &ropes) {
+  Vec2 vel[MAX_SEGMENTS_PER_ROPE];
+  for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
+    int    segs = ropes.segCount[r];
+    size_t base = r * MAX_SEGMENTS_PER_ROPE;
+
+    for (int i = 0; i < segs; ++i) {
+      size_t idx = base + i;
+      vel[i] = {ropes.c_pos[idx].x - ropes.p_pos[idx].x,
+                ropes.c_pos[idx].y - ropes.p_pos[idx].y};
+    }
+
+    for (int i = 0; i < segs; ++i) {
+      if (ropes.invMass[base + i] == 0.0f) continue;
+
+      Vec2 avg = {};
+      int  cnt = 0;
+      if (i > 0)      { avg.x += vel[i-1].x; avg.y += vel[i-1].y; ++cnt; }
+      if (i < segs-1) { avg.x += vel[i+1].x; avg.y += vel[i+1].y; ++cnt; }
+      if (cnt == 0) continue;
+      avg.x /= cnt; avg.y /= cnt;
+
+      ropes.p_pos[base+i].x = ropes.c_pos[base+i].x - (vel[i].x + (avg.x - vel[i].x) * ALIGNMENT);
+      ropes.p_pos[base+i].y = ropes.c_pos[base+i].y - (vel[i].y + (avg.y - vel[i].y) * ALIGNMENT);
+    }
+  }
+}
+
 void StepPhysics(Scene &scene, float dt) {
   RopeStore &ropes   = scene.ropes;
   const float sub_dt = dt / SUBSTEPS;
@@ -306,6 +335,7 @@ void StepPhysics(Scene &scene, float dt) {
     SolveRopeConstraints(ropes, sub_dt);
     SolveAngleConstraints(ropes);
     SolveRopeSelfCollisions(ropes);
+    AlignVelocities(ropes);
 
     for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
       int    segs = ropes.segCount[r];

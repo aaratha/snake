@@ -33,9 +33,13 @@ int main(int, char **) {
 
   SpawnRope(scene.ropes, {-500.0f, 0.0f}, {500.0f, 0.0f}, 64);
 
-  scene.rigidBodies.bodies.push_back(MakeCircle   ({-200.0f, 200.0f}, {0.0f, 0.0f}, 40.0f));
-  scene.rigidBodies.bodies.push_back(MakeRectangle({ 150.0f, 250.0f}, {0.0f, 0.0f}, 100.0f, 60.0f, 0.4f));
-  scene.rigidBodies.bodies.push_back(MakeCircle   ({ 300.0f, 150.0f}, {0.0f, 0.0f}, 30.0f));
+  scene.rigidBodies.bodies.push_back(MakeCircle({-200.0f, 200.0f},
+                                                {0.0f, 0.0f}, 40.0f));
+  scene.rigidBodies.bodies.push_back(MakeRectangle({150.0f, 250.0f},
+                                                   {0.0f, 0.0f}, 100.0f,
+                                                   60.0f, 0.4f));
+  scene.rigidBodies.bodies.push_back(MakeCircle({300.0f, 150.0f},
+                                                {0.0f, 0.0f}, 30.0f));
 
   float accumulator  = 0.0f;
   float smoothFps    = 0.0f;

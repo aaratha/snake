@@ -22,9 +22,9 @@ struct RigidBodyStore {
 };
 
 RigidBody MakeCircle   (Vec2 pos, Vec2 vel, float radius,
-                        float density = 0.001f);
+                        float density = 0.0001f);
 RigidBody MakeRectangle(Vec2 pos, Vec2 vel, float w, float h,
-                        float angle = 0.0f, float density = 0.001f);
+                        float angle = 0.0f, float density = 0.0001f);
 
 void StepRigidBodies(RigidBodyStore &store, float dt);
 
