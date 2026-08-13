@@ -1,4 +1,5 @@
 #include "input.hpp"
+#include "physics.hpp"
 #include <SDL3/SDL.h>
 #include <cmath>
 
@@ -56,9 +57,16 @@ void UpdateDrag(InputState &input, Scene &scene, const Camera &cam, SDL_Window *
   Vec2 &pos    = scene.ropes.c_pos[input.dragIdx];
   Vec2 &prev   = scene.ropes.p_pos[input.dragIdx];
 
-  // store current as previous so Verlet sees the lerp delta as velocity
   prev = pos;
   float alpha = 1.0f - std::exp(-DRAG_RATE * dt);
-  pos.x += (target.x - pos.x) * alpha;
-  pos.y += (target.y - pos.y) * alpha;
+  float nx = (target.x - pos.x) * alpha;
+  float ny = (target.y - pos.y) * alpha;
+  float speed2 = nx*nx + ny*ny;
+  if (speed2 > MAX_VELOCITY * MAX_VELOCITY) {
+    float scale = MAX_VELOCITY / std::sqrt(speed2);
+    nx *= scale;
+    ny *= scale;
+  }
+  pos.x += nx;
+  pos.y += ny;
 }

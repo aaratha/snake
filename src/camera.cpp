@@ -7,7 +7,7 @@ static constexpr float CAM_ZOOM_MARGIN = 0.50f;
 static constexpr float CAM_ZOOM_MIN    = 0.01f;
 static constexpr float CAM_ZOOM_MAX    = 0.8f;
 static constexpr float CAM_DRAG_SKEW   = 0.7f;
-static constexpr float CAM_DEADZONE    = 0.15f; // fraction from edge that triggers camera movement
+static constexpr float CAM_DEADZONE    = 0.20f; // fraction from edge that triggers camera movement
 static constexpr float CAM_RELEASE     = 0.30f; // camera stops only once all points are this far inside
 
 void UpdateCamera(Camera &cam, const RopeStore &ropes,
@@ -55,11 +55,12 @@ void UpdateCamera(Camera &cam, const RopeStore &ropes,
   }
   if (anyOutside)             camActive = true;
   else if (allInsideRel)      camActive = false;
+  float zoomAlpha = 1.0f - std::exp(-CAM_ZOOM_RATE * dt);
+  cam.zoom += (targetZoom - cam.zoom) * zoomAlpha;
+
   if (!camActive) return;
 
-  float posAlpha  = 1.0f - std::exp(-CAM_POS_RATE  * dt);
-  float zoomAlpha = 1.0f - std::exp(-CAM_ZOOM_RATE * dt);
+  float posAlpha = 1.0f - std::exp(-CAM_POS_RATE * dt);
   cam.pos.x += (target.x - cam.pos.x) * posAlpha;
   cam.pos.y += (target.y - cam.pos.y) * posAlpha;
-  cam.zoom  += (targetZoom - cam.zoom) * zoomAlpha;
 }

@@ -1,6 +1,7 @@
 #include "physics.hpp"
 #include "scene.hpp"
 #include "spatial_hash.hpp"
+#include <algorithm>
 #include <cmath>
 #include <numbers>
 
@@ -26,9 +27,8 @@ consteval float cos_deg(float deg) {
   return s;
 }
 
-static constexpr float MIN_BEND_COS   = cos_deg(MIN_BEND_ANGLE);
-static constexpr float PENALTY_STIFFNESS = 0.3f; // fraction of penetration corrected per substep (0=none, 1=hard)
-static constexpr float CONTACT_DAMP      = 0.3f; // fraction of normal velocity removed at contacts
+static constexpr float MIN_BEND_COS     = cos_deg(MIN_BEND_ANGLE);
+static constexpr float MAX_BODY_VELOCITY = 30.0f; // world units per substep
 
 void IntegrateRopePositions(RopeStore &ropes, float /*dt*/) {
   for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
@@ -39,6 +39,12 @@ void IntegrateRopePositions(RopeStore &ropes, float /*dt*/) {
       if (ropes.invMass[idx] == 0.0f) continue;
       Vec2 vel = {ropes.c_pos[idx].x - ropes.p_pos[idx].x,
                   ropes.c_pos[idx].y - ropes.p_pos[idx].y};
+      float speed2 = vel.x*vel.x + vel.y*vel.y;
+      if (speed2 > MAX_BODY_VELOCITY * MAX_BODY_VELOCITY) {
+        float scale = MAX_BODY_VELOCITY / std::sqrt(speed2);
+        vel.x *= scale;
+        vel.y *= scale;
+      }
       ropes.p_pos[idx] = ropes.c_pos[idx];
       ropes.c_pos[idx].x += vel.x * FRICTION;
       ropes.c_pos[idx].y += vel.y * FRICTION;
@@ -142,68 +148,71 @@ static void SolveRopeSelfCollisions(RopeStore &ropes) {
   static SpatialHash sh;
   static std::vector<int> cands;
   static uint32_t visited[MAX_SEGMENTS_PER_ROPE];
-  static uint32_t gen = 0;  // generation counter for O(1) visited-set clear
+  static uint32_t gen = 0;
 
   for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
     int    segs = ropes.segCount[r];
     size_t base = r * MAX_SEGMENTS_PER_ROPE;
 
-    // Build: insert each segment into every grid cell its AABB covers
+    auto predPos = [&](size_t idx) -> Vec2 {
+      return {2*ropes.c_pos[idx].x - ropes.p_pos[idx].x,
+              2*ropes.c_pos[idx].y - ropes.p_pos[idx].y};
+    };
+
+    // Build: use union of current and predicted AABBs so fast-moving segments aren't missed
     sh.clear();
     for (int i = 0; i < segs - 1; ++i) {
-      float ax = ropes.c_pos[base+i].x,   ay = ropes.c_pos[base+i].y;
-      float bx = ropes.c_pos[base+i+1].x, by = ropes.c_pos[base+i+1].y;
-      int x0 = (int)std::floor(std::min(ax,bx) / CELL);
-      int x1 = (int)std::floor(std::max(ax,bx) / CELL);
-      int y0 = (int)std::floor(std::min(ay,by) / CELL);
-      int y1 = (int)std::floor(std::max(ay,by) / CELL);
-      for (int x = x0; x <= x1; x++)
-        for (int y = y0; y <= y1; y++)
+      size_t ia = base+i, ib = base+i+1;
+      Vec2 pa = predPos(ia), pb = predPos(ib);
+      float x0 = std::min({ropes.c_pos[ia].x, ropes.c_pos[ib].x, pa.x, pb.x});
+      float x1 = std::max({ropes.c_pos[ia].x, ropes.c_pos[ib].x, pa.x, pb.x});
+      float y0 = std::min({ropes.c_pos[ia].y, ropes.c_pos[ib].y, pa.y, pb.y});
+      float y1 = std::max({ropes.c_pos[ia].y, ropes.c_pos[ib].y, pa.y, pb.y});
+      for (int x = (int)std::floor(x0/CELL); x <= (int)std::floor(x1/CELL); x++)
+        for (int y = (int)std::floor(y0/CELL); y <= (int)std::floor(y1/CELL); y++)
           sh.insert(x, y, i);
     }
 
-    // Query: for each segment, check the 3×3 neighbourhood of cells it spans
     for (int i = 0; i < segs - 1; ++i) {
-      float ax = ropes.c_pos[base+i].x,   ay = ropes.c_pos[base+i].y;
-      float bx = ropes.c_pos[base+i+1].x, by = ropes.c_pos[base+i+1].y;
-      int x0 = (int)std::floor(std::min(ax,bx) / CELL) - 1;
-      int x1 = (int)std::floor(std::max(ax,bx) / CELL) + 1;
-      int y0 = (int)std::floor(std::min(ay,by) / CELL) - 1;
-      int y1 = (int)std::floor(std::max(ay,by) / CELL) + 1;
+      size_t ia = base+i, ib = base+i+1;
+      Vec2 pa = predPos(ia), pb = predPos(ib);
+      float x0 = std::min({ropes.c_pos[ia].x, ropes.c_pos[ib].x, pa.x, pb.x});
+      float x1 = std::max({ropes.c_pos[ia].x, ropes.c_pos[ib].x, pa.x, pb.x});
+      float y0 = std::min({ropes.c_pos[ia].y, ropes.c_pos[ib].y, pa.y, pb.y});
+      float y1 = std::max({ropes.c_pos[ia].y, ropes.c_pos[ib].y, pa.y, pb.y});
 
       cands.clear();
       ++gen;
-      for (int x = x0; x <= x1; x++)
-        for (int y = y0; y <= y1; y++)
+      for (int x = (int)std::floor(x0/CELL)-1; x <= (int)std::floor(x1/CELL)+1; x++)
+        for (int y = (int)std::floor(y0/CELL)-1; y <= (int)std::floor(y1/CELL)+1; y++)
           sh.query(x, y, [&](int j) {
-            if (j < i + MIN_COLL_GAP) return;  // skip adjacent + already-processed pairs
-            if (visited[j] == gen)     return;  // skip duplicates from shared cells
+            if (j < i + MIN_COLL_GAP) return;
+            if (visited[j] == gen)     return;
             visited[j] = gen;
             cands.push_back(j);
           });
 
-      size_t ia = base + i, ib = base + i + 1;
       for (int j : cands) {
         if (j >= segs - 1) continue;
-        size_t ja = base + j, jb = base + j + 1;
+        size_t ja = base+j, jb = base+j+1;
+
+        // Narrowphase on predicted positions
+        Vec2 p_ia = predPos(ia), p_ib = predPos(ib);
+        Vec2 p_ja = predPos(ja), p_jb = predPos(jb);
 
         float s, t;
-        ClosestSegmentPoints(ropes.c_pos[ia], ropes.c_pos[ib],
-                             ropes.c_pos[ja], ropes.c_pos[jb], s, t);
+        ClosestSegmentPoints(p_ia, p_ib, p_ja, p_jb, s, t);
 
-        float c1x = ropes.c_pos[ia].x + s * (ropes.c_pos[ib].x - ropes.c_pos[ia].x);
-        float c1y = ropes.c_pos[ia].y + s * (ropes.c_pos[ib].y - ropes.c_pos[ia].y);
-        float c2x = ropes.c_pos[ja].x + t * (ropes.c_pos[jb].x - ropes.c_pos[ja].x);
-        float c2y = ropes.c_pos[ja].y + t * (ropes.c_pos[jb].y - ropes.c_pos[ja].y);
-
+        float c1x = p_ia.x + s*(p_ib.x - p_ia.x), c1y = p_ia.y + s*(p_ib.y - p_ia.y);
+        float c2x = p_ja.x + t*(p_jb.x - p_ja.x), c2y = p_ja.y + t*(p_jb.y - p_ja.y);
         float dx = c2x - c1x, dy = c2y - c1y;
-        if (dx*dx + dy*dy >= minDist2) continue;
+        float pred_dist2 = dx*dx + dy*dy;
+        if (pred_dist2 >= minDist2) continue;
 
-        float dist = std::sqrt(dx*dx + dy*dy);
-        if (dist < 1e-6f) continue;
+        float pred_dist = std::sqrt(pred_dist2);
+        if (pred_dist < 1e-6f) continue;
 
-        float nx = dx / dist, ny = dy / dist;
-        float overlap = minDist - dist;
+        float nx = dx/pred_dist, ny = dy/pred_dist;
 
         float w_ia = ropes.invMass[ia], w_ib = ropes.invMass[ib];
         float w_ja = ropes.invMass[ja], w_jb = ropes.invMass[jb];
@@ -211,28 +220,48 @@ static void SolveRopeSelfCollisions(RopeStore &ropes) {
                    + (1-t)*(1-t)*w_ja + t*t*w_jb;
         if (wEff < 1e-10f) continue;
 
-        float lambda = PENALTY_STIFFNESS * overlap / wEff;
-        ropes.c_pos[ia].x -= w_ia * (1-s) * lambda * nx;
-        ropes.c_pos[ia].y -= w_ia * (1-s) * lambda * ny;
-        ropes.c_pos[ib].x -= w_ib * s     * lambda * nx;
-        ropes.c_pos[ib].y -= w_ib * s     * lambda * ny;
-        ropes.c_pos[ja].x += w_ja * (1-t) * lambda * nx;
-        ropes.c_pos[ja].y += w_ja * (1-t) * lambda * ny;
-        ropes.c_pos[jb].x += w_jb * t     * lambda * nx;
-        ropes.c_pos[jb].y += w_jb * t     * lambda * ny;
-
-        auto dampContact = [&](size_t idx, float w) {
-          if (w < 1e-6f) return;
-          float vx = ropes.c_pos[idx].x - ropes.p_pos[idx].x;
-          float vy = ropes.c_pos[idx].y - ropes.p_pos[idx].y;
-          float vn = vx * nx + vy * ny;
-          ropes.p_pos[idx].x += w * CONTACT_DAMP * vn * nx;
-          ropes.p_pos[idx].y += w * CONTACT_DAMP * vn * ny;
+        // Closing velocity at predicted contact points (positive = approaching)
+        auto vn = [&](size_t idx) {
+          return (ropes.c_pos[idx].x - ropes.p_pos[idx].x)*nx
+               + (ropes.c_pos[idx].y - ropes.p_pos[idx].y)*ny;
         };
-        dampContact(ia, 1-s);
-        dampContact(ib, s);
-        dampContact(ja, 1-t);
-        dampContact(jb, t);
+        float v_rel = (1-s)*vn(ia) + s*vn(ib) - (1-t)*vn(ja) - t*vn(jb);
+
+        // Velocity correction: zero when separating (false positive filter)
+        float vel_lambda = std::max(0.0f, v_rel) / wEff;
+
+        // Position correction: push out current overlap immediately
+        float cur_c1x = ropes.c_pos[ia].x + s*(ropes.c_pos[ib].x - ropes.c_pos[ia].x);
+        float cur_c1y = ropes.c_pos[ia].y + s*(ropes.c_pos[ib].y - ropes.c_pos[ia].y);
+        float cur_c2x = ropes.c_pos[ja].x + t*(ropes.c_pos[jb].x - ropes.c_pos[ja].x);
+        float cur_c2y = ropes.c_pos[ja].y + t*(ropes.c_pos[jb].y - ropes.c_pos[ja].y);
+        float cur_dx = cur_c2x - cur_c1x, cur_dy = cur_c2y - cur_c1y;
+        float cur_dist2 = cur_dx*cur_dx + cur_dy*cur_dy;
+        float pos_lambda = cur_dist2 < minDist2
+            ? (minDist - std::sqrt(cur_dist2)) / wEff
+            : 0.0f;
+
+        if (pos_lambda > 0.0f) {
+          ropes.c_pos[ia].x -= w_ia*(1-s)*pos_lambda*nx;
+          ropes.c_pos[ia].y -= w_ia*(1-s)*pos_lambda*ny;
+          ropes.c_pos[ib].x -= w_ib*s    *pos_lambda*nx;
+          ropes.c_pos[ib].y -= w_ib*s    *pos_lambda*ny;
+          ropes.c_pos[ja].x += w_ja*(1-t)*pos_lambda*nx;
+          ropes.c_pos[ja].y += w_ja*(1-t)*pos_lambda*ny;
+          ropes.c_pos[jb].x += w_jb*t    *pos_lambda*nx;
+          ropes.c_pos[jb].y += w_jb*t    *pos_lambda*ny;
+        }
+
+        if (vel_lambda > 0.0f) {
+          ropes.p_pos[ia].x += w_ia*(1-s)*vel_lambda*nx;
+          ropes.p_pos[ia].y += w_ia*(1-s)*vel_lambda*ny;
+          ropes.p_pos[ib].x += w_ib*s    *vel_lambda*nx;
+          ropes.p_pos[ib].y += w_ib*s    *vel_lambda*ny;
+          ropes.p_pos[ja].x -= w_ja*(1-t)*vel_lambda*nx;
+          ropes.p_pos[ja].y -= w_ja*(1-t)*vel_lambda*ny;
+          ropes.p_pos[jb].x -= w_jb*t    *vel_lambda*nx;
+          ropes.p_pos[jb].y -= w_jb*t    *vel_lambda*ny;
+        }
       }
     }
   }
