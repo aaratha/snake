@@ -52,7 +52,7 @@ void DestroyRope(RopeStore &store, RopeId rope) {
 void addRopeSegment(RopeStore &store, RopeId rope) {
   size_t base = static_cast<size_t>(rope) * MAX_SEGMENTS_PER_ROPE;
   int segs = store.segCount[static_cast<size_t>(rope)];
-  if (segs >= MAX_SEGMENTS_PER_ROPE) return;
+  if (segs >= static_cast<int>(MAX_SEGMENTS_PER_ROPE)) return;
 
   Vec2 lastPos = store.c_pos[base + segs - 1];
   Vec2 secondLastPos = store.c_pos[base + segs - 2];

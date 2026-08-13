@@ -16,3 +16,7 @@ struct Camera {
   Vec2 pos;   // world-space point at the center of the screen
   float zoom; // screen pixels per world unit
 };
+
+struct Color {
+  float r, g, b, a;
+};

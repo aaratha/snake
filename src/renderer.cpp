@@ -5,10 +5,12 @@
 #include <cmath>
 #include <cstdio>
 #include <vector>
+#include <bit>
 
 static constexpr float FLATNESS_PX    = 0.5f;
 static constexpr int   MAX_SUBDIV     = 8;
 static constexpr float ROPE_THICKNESS = 6.0f; // world-space units; scales with zoom
+static constexpr float MAX_STRETCH    = 0.15f; // normalized stretch at which color is fully red
 
 static Vec2 WorldToScreen(Vec2 w, const Camera &cam, float sw, float sh) {
   return {
@@ -63,7 +65,7 @@ static void DrawFilledCircle(SDL_Renderer *ren, Vec2 center, float radius, SDL_F
 }
 
 static void DrawThickPolyline(SDL_Renderer *ren,
-                               const std::vector<Vec2> &pts, float thickness) {
+                              const std::vector<Vec2> &pts, const std::vector<Color> &colors, float thickness) {
   size_t n = pts.size();
   if (n < 2) return;
 
@@ -86,14 +88,14 @@ static void DrawThickPolyline(SDL_Renderer *ren,
   }
 
   float half = thickness * 0.5f;
-  SDL_FColor col = {0.0f, 0.0f, 0.0f, 1.0f};
 
   std::vector<SDL_Vertex> verts;
   verts.reserve(n * 2);
   for (size_t i = 0; i < n; ++i) {
     Vec2 nx = normals[i];
-    verts.push_back({{pts[i].x - nx.x*half, pts[i].y - nx.y*half}, col, {0,0}});
-    verts.push_back({{pts[i].x + nx.x*half, pts[i].y + nx.y*half}, col, {0,0}});
+    Color col = colors[i];
+    verts.push_back({{pts[i].x - nx.x*half, pts[i].y - nx.y*half}, std::bit_cast<SDL_FColor>(col), {0,0}});
+    verts.push_back({{pts[i].x + nx.x*half, pts[i].y + nx.y*half}, std::bit_cast<SDL_FColor>(col), {0,0}});
   }
 
   std::vector<int> indices;
@@ -115,13 +117,41 @@ void DrawRope(SDL_Renderer *ren, const RopeStore &ropes, const Camera &cam) {
   float sw = (float)iw, sh = (float)ih;
 
   for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
-    int    segs = ropes.segCount[r];
-    size_t base = r * MAX_SEGMENTS_PER_ROPE;
+    int    segs  = ropes.segCount[r];
+    size_t base  = r * MAX_SEGMENTS_PER_ROPE;
+    size_t cbase = r * (MAX_SEGMENTS_PER_ROPE - 1);
     if (segs < 2) continue;
 
-    std::vector<Vec2> pts;
+    auto tensionColor = [&](int seg) -> Color {
+      float dx = ropes.c_pos[base + seg + 1].x - ropes.c_pos[base + seg].x;
+      float dy = ropes.c_pos[base + seg + 1].y - ropes.c_pos[base + seg].y;
+      float dist    = std::sqrt(dx*dx + dy*dy);
+      float rest    = ropes.constraints[cbase + seg].restLength;
+      float stretch = (dist - rest) / rest;
+      float t       = stretch < 0.0f ? 0.0f : stretch > MAX_STRETCH ? 1.0f : stretch / MAX_STRETCH;
+      return {t, 0, 0, 1.0f};
+    };
+
+    // per-node color: average adjacent constraint tensions so colors blend smoothly across boundaries
+    std::vector<Color> nodeColor(segs);
+    for (int i = 0; i < segs; ++i) {
+      if (i == 0) {
+        nodeColor[i] = tensionColor(0);
+      } else if (i == segs - 1) {
+        nodeColor[i] = tensionColor(segs - 2);
+      } else {
+        Color a = tensionColor(i - 1), b = tensionColor(i);
+        nodeColor[i] = {(a.r+b.r)*0.5f, (a.g+b.g)*0.5f, (a.b+b.b)*0.5f, 1.0f};
+      }
+    }
+
+    std::vector<Vec2>  pts;
+    std::vector<Color> ptColors;
     pts.reserve(segs * 4);
+    ptColors.reserve(segs * 4);
+
     pts.push_back(WorldToScreen(ropes.c_pos[base], cam, sw, sh));
+    ptColors.push_back(nodeColor[0]);
 
     for (int i = 0; i < segs - 1; ++i) {
       Vec2 sA = WorldToScreen(ropes.c_pos[base + i],     cam, sw, sh);
@@ -133,14 +163,21 @@ void DrawRope(SDL_Renderer *ren, const RopeStore &ropes, const Camera &cam) {
         ? WorldToScreen(ropes.c_pos[base + i + 2], cam, sw, sh)
         : Vec2{2.0f*sB.x - sA.x, 2.0f*sB.y - sA.y};
 
+      size_t before = pts.size();
       CRcollect(pts, sP, sA, sB, sN, sA, sB, 0.0f, 1.0f, 0);
+      size_t added = pts.size() - before;
+      Color ca = nodeColor[i], cb = nodeColor[i + 1];
+      for (size_t j = 0; j < added; ++j) {
+        float t = (float)(j + 1) / (float)added;
+        ptColors.push_back({ca.r + (cb.r-ca.r)*t, ca.g + (cb.g-ca.g)*t, ca.b + (cb.b-ca.b)*t, 1.0f});
+      }
     }
 
-    DrawThickPolyline(ren, pts, ROPE_THICKNESS * cam.zoom);
+    DrawThickPolyline(ren, pts, ptColors, ROPE_THICKNESS * cam.zoom);
 
-    Vec2 tail = WorldToScreen(ropes.c_pos[base + segs - 1], cam, sw, sh);
-    SDL_FColor red = {1.0f, 0.0f, 0.0f, 1.0f};
-    DrawFilledCircle(ren, tail, 6.0f, red);
+    Vec2 head = WorldToScreen(ropes.c_pos[base], cam, sw, sh);
+    SDL_FColor headCol = {0.2f, 0.2f, 0.2f, 1.0f};
+    DrawFilledCircle(ren, head, ROPE_THICKNESS * cam.zoom * 0.5f, headCol);
   }
 }
 
@@ -200,9 +237,48 @@ static void DrawFPS(SDL_Renderer *ren, float fps) {
   SDL_DestroyTexture(tex);
 }
 
+void DrawRigidBodies(SDL_Renderer *ren, const RigidBodyStore &store, const Camera &cam) {
+  int iw, ih;
+  SDL_GetRenderOutputSize(ren, &iw, &ih);
+  float sw = (float)iw, sh = (float)ih;
+
+  for (const auto &b : store.bodies) {
+    Vec2 center = WorldToScreen(b.pos, cam, sw, sh);
+
+    if (b.shape == ShapeType::Circle) {
+      SDL_FColor col = {0.2f, 0.55f, 0.9f, 1.0f};
+      DrawFilledCircle(ren, center, b.radius * cam.zoom, col);
+      // rotation indicator
+      float ex = center.x + std::cos(b.angle) * b.radius * cam.zoom;
+      float ey = center.y + std::sin(b.angle) * b.radius * cam.zoom;
+      SDL_SetRenderDrawColorFloat(ren, 1.0f, 1.0f, 1.0f, 1.0f);
+      SDL_RenderLine(ren, center.x, center.y, ex, ey);
+    } else {
+      // Build rotated quad in screen space
+      float c = std::cos(b.angle), s = std::sin(b.angle);
+      float ex = b.halfExtents.x * cam.zoom, ey = b.halfExtents.y * cam.zoom;
+      Vec2 ax = { c*ex,  s*ex};
+      Vec2 ay = {-s*ey,  c*ey};
+      SDL_FColor col = {0.9f, 0.6f, 0.15f, 1.0f};
+      SDL_Vertex verts[4] = {
+        {{center.x + ax.x + ay.x, center.y + ax.y + ay.y}, col, {0,0}},
+        {{center.x - ax.x + ay.x, center.y - ax.y + ay.y}, col, {0,0}},
+        {{center.x - ax.x - ay.x, center.y - ax.y - ay.y}, col, {0,0}},
+        {{center.x + ax.x - ay.x, center.y + ax.y - ay.y}, col, {0,0}},
+      };
+      int indices[] = {0,1,2, 0,2,3};
+      SDL_RenderGeometry(ren, nullptr, verts, 4, indices, 6);
+      // rotation indicator (along local x-axis)
+      SDL_SetRenderDrawColorFloat(ren, 1.0f, 1.0f, 1.0f, 1.0f);
+      SDL_RenderLine(ren, center.x, center.y, center.x + ax.x, center.y + ax.y);
+    }
+  }
+}
+
 void RenderFrame(SDL_Renderer *ren, const Scene &scene, const Camera &cam, float fps) {
   SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
   SDL_RenderClear(ren);
+  DrawRigidBodies(ren, scene.rigidBodies, cam);
   DrawRope(ren, scene.ropes, cam);
   DrawFood(ren, scene.foodStore, cam);
   DrawFPS(ren, fps);

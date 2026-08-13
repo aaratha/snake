@@ -1,5 +1,6 @@
 #include "physics.hpp"
 #include "scene.hpp"
+#include "spatial_hash.hpp"
 #include <cmath>
 #include <numbers>
 
@@ -132,18 +133,58 @@ static void SolveAngleConstraints(RopeStore &ropes) {
   }
 }
 
+
 static void SolveRopeSelfCollisions(RopeStore &ropes) {
   const float minDist  = 2.0f * ROPE_RADIUS;
   const float minDist2 = minDist * minDist;
+  const float CELL     = minDist;
+
+  static SpatialHash sh;
+  static std::vector<int> cands;
+  static uint32_t visited[MAX_SEGMENTS_PER_ROPE];
+  static uint32_t gen = 0;  // generation counter for O(1) visited-set clear
 
   for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
     int    segs = ropes.segCount[r];
     size_t base = r * MAX_SEGMENTS_PER_ROPE;
 
-    // iterate over all non-adjacent segment pairs (i,i+1) vs (j,j+1)
+    // Build: insert each segment into every grid cell its AABB covers
+    sh.clear();
     for (int i = 0; i < segs - 1; ++i) {
-      for (int j = i + MIN_COLL_GAP; j < segs - 1; ++j) {
-        size_t ia = base + i, ib = base + i + 1;
+      float ax = ropes.c_pos[base+i].x,   ay = ropes.c_pos[base+i].y;
+      float bx = ropes.c_pos[base+i+1].x, by = ropes.c_pos[base+i+1].y;
+      int x0 = (int)std::floor(std::min(ax,bx) / CELL);
+      int x1 = (int)std::floor(std::max(ax,bx) / CELL);
+      int y0 = (int)std::floor(std::min(ay,by) / CELL);
+      int y1 = (int)std::floor(std::max(ay,by) / CELL);
+      for (int x = x0; x <= x1; x++)
+        for (int y = y0; y <= y1; y++)
+          sh.insert(x, y, i);
+    }
+
+    // Query: for each segment, check the 3×3 neighbourhood of cells it spans
+    for (int i = 0; i < segs - 1; ++i) {
+      float ax = ropes.c_pos[base+i].x,   ay = ropes.c_pos[base+i].y;
+      float bx = ropes.c_pos[base+i+1].x, by = ropes.c_pos[base+i+1].y;
+      int x0 = (int)std::floor(std::min(ax,bx) / CELL) - 1;
+      int x1 = (int)std::floor(std::max(ax,bx) / CELL) + 1;
+      int y0 = (int)std::floor(std::min(ay,by) / CELL) - 1;
+      int y1 = (int)std::floor(std::max(ay,by) / CELL) + 1;
+
+      cands.clear();
+      ++gen;
+      for (int x = x0; x <= x1; x++)
+        for (int y = y0; y <= y1; y++)
+          sh.query(x, y, [&](int j) {
+            if (j < i + MIN_COLL_GAP) return;  // skip adjacent + already-processed pairs
+            if (visited[j] == gen)     return;  // skip duplicates from shared cells
+            visited[j] = gen;
+            cands.push_back(j);
+          });
+
+      size_t ia = base + i, ib = base + i + 1;
+      for (int j : cands) {
+        if (j >= segs - 1) continue;
         size_t ja = base + j, jb = base + j + 1;
 
         float s, t;
@@ -162,7 +203,7 @@ static void SolveRopeSelfCollisions(RopeStore &ropes) {
         if (dist < 1e-6f) continue;
 
         float nx = dx / dist, ny = dy / dist;
-        float overlap = minDist - dist; // positive when penetrating
+        float overlap = minDist - dist;
 
         float w_ia = ropes.invMass[ia], w_ib = ropes.invMass[ib];
         float w_ja = ropes.invMass[ja], w_jb = ropes.invMass[jb];
@@ -180,7 +221,6 @@ static void SolveRopeSelfCollisions(RopeStore &ropes) {
         ropes.c_pos[jb].x += w_jb * t     * lambda * nx;
         ropes.c_pos[jb].y += w_jb * t     * lambda * ny;
 
-        // damp normal velocity at contact points, weighted by contact participation
         auto dampContact = [&](size_t idx, float w) {
           if (w < 1e-6f) return;
           float vx = ropes.c_pos[idx].x - ropes.p_pos[idx].x;

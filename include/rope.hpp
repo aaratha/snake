@@ -8,6 +8,8 @@
 constexpr uint32_t MAX_ROPES = 10;
 constexpr uint32_t MAX_SEGMENTS_PER_ROPE = 128;
 
+struct SDL_FColor;
+
 struct RopeConstraint {
     uint32_t p1, p2; // local indices within a rope
     float restLength;
