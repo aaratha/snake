@@ -5,16 +5,14 @@
 #include <cmath>
 #include <numbers>
 
-static constexpr float FRICTION        = 0.99f;
 static constexpr float COMPLIANCE      = 1e-7f;
-static constexpr int   SUBSTEPS        = 8;
-static constexpr int   PIN_DAMP_RADIUS  = 3;
-static constexpr float PIN_DAMP         = 0.50f; // max fraction of velocity removed per substep at pin boundary
-static constexpr int   FREE_DAMP_RADIUS = 6;   // segments from free end to damp
-static constexpr float FREE_DAMP        = 0.1f; // fraction of velocity removed per substep
-static constexpr float ROPE_RADIUS      = 6.0f;
-static constexpr int   MIN_COLL_GAP    = 5;
-static constexpr float MIN_BEND_ANGLE   = 90.0f; // degrees — max allowed bend between segments
+static constexpr int   SUBSTEPS        = 16;
+static constexpr int   SUBSTEPS_REF    = 8;  // substep count at which damping constants below were tuned
+static constexpr int   PIN_DAMP_RADIUS = 3;
+static constexpr int   FREE_DAMP_RADIUS= 6;
+static constexpr float ROPE_RADIUS     = 6.0f;
+static constexpr int   MIN_COLL_GAP   = 5;
+static constexpr float MIN_BEND_ANGLE  = 90.0f; // degrees — max allowed bend between segments
 
 consteval float cos_deg(float deg) {
   constexpr float PI = std::numbers::pi_v<float>;
@@ -27,9 +25,34 @@ consteval float cos_deg(float deg) {
   return s;
 }
 
-static constexpr float MIN_BEND_COS     = cos_deg(MIN_BEND_ANGLE);
-static constexpr float MAX_BODY_VELOCITY = 30.0f; // world units per substep
-static constexpr float ALIGNMENT         = 0.15f; // fraction of velocity to align toward neighbors per substep
+static constexpr float MIN_BEND_COS = cos_deg(MIN_BEND_ANGLE);
+
+// Newton-iteration sqrt for use in scaling damping constants at compile time.
+consteval float ce_sqrt(float x) {
+  float s = 1.0f;
+  for (int i = 0; i < 30; ++i) s = 0.5f * (s + x / s);
+  return s;
+}
+
+// Scale a per-substep velocity-retention factor so that per-frame energy dissipation
+// is constant regardless of SUBSTEPS. Supports 2× and ½× multiples of SUBSTEPS_REF.
+// e.g. FRICTION=0.99 at 8 substeps → ce_sqrt(0.99) ≈ 0.9950 at 16 substeps.
+consteval float scale_retention(float f) {
+  if (SUBSTEPS == SUBSTEPS_REF)     return f;
+  if (SUBSTEPS == SUBSTEPS_REF * 2) return ce_sqrt(f);
+  if (SUBSTEPS == SUBSTEPS_REF / 2) return f * f;
+  return f;
+}
+
+// Scale a per-substep damping blend factor (removes α fraction of velocity per substep).
+consteval float scale_damp(float alpha) { return 1.0f - scale_retention(1.0f - alpha); }
+
+static constexpr float FRICTION          = scale_retention(0.99f);
+static constexpr float PIN_DAMP          = scale_damp(0.50f);  // ≈0.293 at SUBSTEPS=16
+static constexpr float FREE_DAMP         = scale_damp(0.10f);  // ≈0.051 at SUBSTEPS=16
+static constexpr float MAX_BODY_VELOCITY = 30.0f;
+static constexpr float ALIGNMENT         = scale_damp(0.10f);  // ≈0.051 at SUBSTEPS=16
+static constexpr float ANGLE_ALIGNMENT   = scale_damp(0.30f);  // ≈0.163 at SUBSTEPS=16
 
 void IntegrateRopePositions(RopeStore &ropes, float /*dt*/) {
   for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
@@ -319,6 +342,58 @@ static void AlignVelocities(RopeStore &ropes) {
   }
 }
 
+static void AlignAngularVelocities(RopeStore &ropes) {
+  Vec2 vBend[MAX_SEGMENTS_PER_ROPE];
+
+  for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
+    int    segs = ropes.segCount[r];
+    size_t base = r * MAX_SEGMENTS_PER_ROPE;
+
+    // Pass 1: extract transverse (bending) velocity at each node
+    for (int i = 0; i < segs; ++i) {
+      size_t idx = base + i;
+      Vec2 v = {ropes.c_pos[idx].x - ropes.p_pos[idx].x,
+                ropes.c_pos[idx].y - ropes.p_pos[idx].y};
+
+      // local tangent via centered difference; endpoints use one-sided
+      Vec2 t;
+      if (i == 0)
+        t = {ropes.c_pos[base+1].x   - ropes.c_pos[base].x,
+             ropes.c_pos[base+1].y   - ropes.c_pos[base].y};
+      else if (i == segs-1)
+        t = {ropes.c_pos[base+segs-1].x - ropes.c_pos[base+segs-2].x,
+             ropes.c_pos[base+segs-1].y - ropes.c_pos[base+segs-2].y};
+      else
+        t = {ropes.c_pos[base+i+1].x - ropes.c_pos[base+i-1].x,
+             ropes.c_pos[base+i+1].y - ropes.c_pos[base+i-1].y};
+
+      float len = std::sqrt(t.x*t.x + t.y*t.y);
+      if (len < 1e-6f) { vBend[i] = {}; continue; }
+      t.x /= len; t.y /= len;
+
+      float axial = v.x*t.x + v.y*t.y;
+      vBend[i] = {v.x - axial*t.x, v.y - axial*t.y};
+    }
+
+    // Pass 2: align transverse velocities with neighbors, apply via p_pos
+    for (int i = 0; i < segs; ++i) {
+      if (ropes.invMass[base + i] == 0.0f) continue;
+
+      Vec2 avg = {};
+      int  cnt = 0;
+      if (i > 0)      { avg.x += vBend[i-1].x; avg.y += vBend[i-1].y; ++cnt; }
+      if (i < segs-1) { avg.x += vBend[i+1].x; avg.y += vBend[i+1].y; ++cnt; }
+      if (cnt == 0) continue;
+      avg.x /= cnt; avg.y /= cnt;
+
+      float dx = (avg.x - vBend[i].x) * ANGLE_ALIGNMENT;
+      float dy = (avg.y - vBend[i].y) * ANGLE_ALIGNMENT;
+      ropes.p_pos[base+i].x -= dx;
+      ropes.p_pos[base+i].y -= dy;
+    }
+  }
+}
+
 void StepPhysics(Scene &scene, float dt) {
   RopeStore &ropes   = scene.ropes;
   const float sub_dt = dt / SUBSTEPS;
@@ -336,6 +411,7 @@ void StepPhysics(Scene &scene, float dt) {
     SolveAngleConstraints(ropes);
     SolveRopeSelfCollisions(ropes);
     AlignVelocities(ropes);
+    AlignAngularVelocities(ropes);
 
     for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
       int    segs = ropes.segCount[r];
