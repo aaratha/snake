@@ -1,8 +1,9 @@
 #include "input.hpp"
 #include <SDL3/SDL.h>
+#include <cmath>
 
 static constexpr float GRAB_RADIUS = 20.0f;
-static constexpr float DRAG_LERP   = 0.001f;
+static constexpr float DRAG_RATE   = 4.0f;  // convergence rate per second
 
 static Vec2 ScreenToWorld(float sx, float sy, const Camera &cam, int winW, int winH) {
   return {(sx - winW * 0.5f) / cam.zoom + cam.pos.x,
@@ -45,7 +46,7 @@ void ProcessEvents(InputState &input, Scene &scene, const Camera &cam, SDL_Windo
   }
 }
 
-void UpdateDrag(InputState &input, Scene &scene, const Camera &cam, SDL_Window *window) {
+void UpdateDrag(InputState &input, Scene &scene, const Camera &cam, SDL_Window *window, float dt) {
   if (!input.dragging) return;
   int winW, winH;
   SDL_GetWindowSize(window, &winW, &winH);
@@ -57,6 +58,7 @@ void UpdateDrag(InputState &input, Scene &scene, const Camera &cam, SDL_Window *
 
   // store current as previous so Verlet sees the lerp delta as velocity
   prev = pos;
-  pos.x += (target.x - pos.x) * DRAG_LERP;
-  pos.y += (target.y - pos.y) * DRAG_LERP;
+  float alpha = 1.0f - std::exp(-DRAG_RATE * dt);
+  pos.x += (target.x - pos.x) * alpha;
+  pos.y += (target.y - pos.y) * alpha;
 }

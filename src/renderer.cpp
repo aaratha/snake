@@ -43,6 +43,25 @@ static void CRcollect(std::vector<Vec2> &pts,
   CRcollect(pts, p0, p1, p2, p3, m, b, tm, tb, depth + 1);
 }
 
+static void DrawFilledCircle(SDL_Renderer *ren, Vec2 center, float radius, SDL_FColor col) {
+  constexpr int SEGS = 24;
+  std::vector<SDL_Vertex> verts;
+  verts.reserve(SEGS + 1);
+  verts.push_back({{center.x, center.y}, col, {0, 0}});
+  for (int i = 0; i <= SEGS; ++i) {
+    float a = (float)i / SEGS * 2.0f * 3.14159265f;
+    verts.push_back({{center.x + std::cos(a) * radius, center.y + std::sin(a) * radius}, col, {0, 0}});
+  }
+  std::vector<int> indices;
+  indices.reserve(SEGS * 3);
+  for (int i = 0; i < SEGS; ++i) {
+    indices.push_back(0);
+    indices.push_back(i + 1);
+    indices.push_back(i + 2);
+  }
+  SDL_RenderGeometry(ren, nullptr, verts.data(), (int)verts.size(), indices.data(), (int)indices.size());
+}
+
 static void DrawThickPolyline(SDL_Renderer *ren,
                                const std::vector<Vec2> &pts, float thickness) {
   size_t n = pts.size();
@@ -118,7 +137,42 @@ void DrawRope(SDL_Renderer *ren, const RopeStore &ropes, const Camera &cam) {
     }
 
     DrawThickPolyline(ren, pts, ROPE_THICKNESS * cam.zoom);
+
+    Vec2 tail = WorldToScreen(ropes.c_pos[base + segs - 1], cam, sw, sh);
+    SDL_FColor red = {1.0f, 0.0f, 0.0f, 1.0f};
+    DrawFilledCircle(ren, tail, 6.0f, red);
   }
+}
+
+void DrawFood(SDL_Renderer *ren, const FoodStore &foodStore, const Camera &cam) {
+  constexpr int SEGS = 24;
+  int iw, ih;
+  SDL_GetRenderOutputSize(ren, &iw, &ih);
+  float sw = (float)iw, sh = (float)ih;
+
+  std::vector<SDL_Vertex> verts;
+  std::vector<int> indices;
+  SDL_FColor green = {0.0f, 1.0f, 0.0f, 1.0f};
+
+  for (const auto &food : foodStore.foods) {
+    if (food.isEaten) continue;
+    Vec2 center = WorldToScreen(food.position, cam, sw, sh);
+    float radius = food.radius * cam.zoom;
+    int base = (int)verts.size();
+    verts.push_back({{center.x, center.y}, green, {0, 0}});
+    for (int i = 0; i <= SEGS; ++i) {
+      float a = (float)i / SEGS * 2.0f * 3.14159265f;
+      verts.push_back({{center.x + std::cos(a) * radius, center.y + std::sin(a) * radius}, green, {0, 0}});
+    }
+    for (int i = 0; i < SEGS; ++i) {
+      indices.push_back(base);
+      indices.push_back(base + i + 1);
+      indices.push_back(base + i + 2);
+    }
+  }
+
+  if (!verts.empty())
+    SDL_RenderGeometry(ren, nullptr, verts.data(), (int)verts.size(), indices.data(), (int)indices.size());
 }
 
 static void DrawFPS(SDL_Renderer *ren, float fps) {
@@ -150,6 +204,7 @@ void RenderFrame(SDL_Renderer *ren, const Scene &scene, const Camera &cam, float
   SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
   SDL_RenderClear(ren);
   DrawRope(ren, scene.ropes, cam);
+  DrawFood(ren, scene.foodStore, cam);
   DrawFPS(ren, fps);
   SDL_RenderPresent(ren);
 }

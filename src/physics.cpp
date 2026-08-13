@@ -7,6 +7,7 @@ static constexpr float FRICTION        = 0.99f;
 static constexpr float COMPLIANCE      = 1e-7f;
 static constexpr int   SUBSTEPS        = 8;
 static constexpr int   PIN_DAMP_RADIUS  = 3;
+static constexpr float PIN_DAMP         = 0.50f; // max fraction of velocity removed per substep at pin boundary
 static constexpr int   FREE_DAMP_RADIUS = 6;   // segments from free end to damp
 static constexpr float FREE_DAMP        = 0.1f; // fraction of velocity removed per substep
 static constexpr float ROPE_RADIUS      = 6.0f;
@@ -24,7 +25,8 @@ consteval float cos_deg(float deg) {
   return s;
 }
 
-static constexpr float MIN_BEND_COS = cos_deg(MIN_BEND_ANGLE);
+static constexpr float MIN_BEND_COS   = cos_deg(MIN_BEND_ANGLE);
+static constexpr float CONTACT_DAMP   = 0.3f; // fraction of normal velocity removed at contacts
 
 void IntegrateRopePositions(RopeStore &ropes, float /*dt*/) {
   for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
@@ -176,6 +178,20 @@ static void SolveRopeSelfCollisions(RopeStore &ropes) {
         ropes.c_pos[ja].y += w_ja * (1-t) * lambda * ny;
         ropes.c_pos[jb].x += w_jb * t     * lambda * nx;
         ropes.c_pos[jb].y += w_jb * t     * lambda * ny;
+
+        // damp normal velocity at contact points, weighted by contact participation
+        auto dampContact = [&](size_t idx, float w) {
+          if (w < 1e-6f) return;
+          float vx = ropes.c_pos[idx].x - ropes.p_pos[idx].x;
+          float vy = ropes.c_pos[idx].y - ropes.p_pos[idx].y;
+          float vn = vx * nx + vy * ny;
+          ropes.p_pos[idx].x += w * CONTACT_DAMP * vn * nx;
+          ropes.p_pos[idx].y += w * CONTACT_DAMP * vn * ny;
+        };
+        dampContact(ia, 1-s);
+        dampContact(ib, s);
+        dampContact(ja, 1-t);
+        dampContact(jb, t);
       }
     }
   }
@@ -225,18 +241,25 @@ void StepPhysics(Scene &scene, float dt) {
       int    segs = ropes.segCount[r];
       size_t base = r * MAX_SEGMENTS_PER_ROPE;
 
-      // zero velocity near pinned points
+      // damp velocity near pinned points; pin itself is fully zeroed, neighbours get a
+      // small per-substep fraction that falls off linearly — keeps the gradient real
+      // across all 8 substeps rather than collapsing to zero at every boundary
       for (int i = 0; i < segs; ++i) {
         if (ropes.invMass[base + i] != 0.0f) continue;
+        ropes.p_pos[base + i] = ropes.c_pos[base + i]; // pin: full zero
         int lo = std::max(0, i - PIN_DAMP_RADIUS);
         int hi = std::min(segs - 1, i + PIN_DAMP_RADIUS);
-        for (int j = lo; j <= hi; ++j)
-          ropes.p_pos[base + j] = ropes.c_pos[base + j];
+        for (int j = lo; j <= hi; ++j) {
+          if (j == i) continue;
+          float t = PIN_DAMP * (1.0f - (float)std::abs(j - i) / (PIN_DAMP_RADIUS + 1.0f));
+          ropes.p_pos[base+j].x += (ropes.c_pos[base+j].x - ropes.p_pos[base+j].x) * t;
+          ropes.p_pos[base+j].y += (ropes.c_pos[base+j].y - ropes.p_pos[base+j].y) * t;
+        }
       }
 
-      // bleed velocity at each free endpoint so wave energy doesn't reflect and build
+      // bleed velocity near each endpoint — apply even when pinned so fast turns
+      // don't leave segments 4-6 completely undamped on the dragged-head side
       auto dampEnd = [&](int endpoint) {
-        if (ropes.invMass[base + endpoint] == 0.0f) return; // pinned, skip
         int lo = (endpoint == 0) ? 0 : std::max(0, segs - 1 - FREE_DAMP_RADIUS);
         int hi = (endpoint == 0) ? std::min(segs - 1, FREE_DAMP_RADIUS) : segs - 1;
         for (int j = lo; j <= hi; ++j) {

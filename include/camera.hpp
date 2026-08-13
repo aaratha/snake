@@ -5,4 +5,4 @@
 #include "types.hpp"
 
 void UpdateCamera(Camera &cam, const RopeStore &ropes,
-                  const InputState &input, float sw, float sh);
+                  const InputState &input, float sw, float sh, float dt);

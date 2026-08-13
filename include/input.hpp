@@ -13,4 +13,4 @@ struct InputState {
 };
 
 void ProcessEvents(InputState &input, Scene &scene, const Camera &cam, SDL_Window *window);
-void UpdateDrag(InputState &input, Scene &scene, const Camera &cam, SDL_Window *window);
+void UpdateDrag(InputState &input, Scene &scene, const Camera &cam, SDL_Window *window, float dt);

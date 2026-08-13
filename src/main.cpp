@@ -25,15 +25,17 @@ int main(int, char **) {
 
   Scene scene;
   InitRopeStore(scene.ropes);
+  InitFoodStore(scene.foodStore, 100);
 
   Camera     cam{{0.0f, 0.0f}, 1.0f};
   InputState input;
 
   SpawnRope(scene.ropes, {-500.0f, 0.0f}, {500.0f, 0.0f}, 64);
 
-  float accumulator = 0.0f;
-  float smoothFps   = 0.0f;
-  auto  lastTime    = Clock::now();
+  float accumulator  = 0.0f;
+  float smoothFps    = 0.0f;
+  bool  growByLength = false;
+  auto  lastTime     = Clock::now();
 
   while (!input.quit) {
     auto  now       = Clock::now();
@@ -43,7 +45,7 @@ int main(int, char **) {
       smoothFps += (1.0f / frameTime - smoothFps) * 0.1f;
 
     ProcessEvents(input, scene, cam, window);
-    UpdateDrag(input, scene, cam, window);
+    UpdateDrag(input, scene, cam, window, frameTime);
 
     accumulator += frameTime;
     int steps = 0;
@@ -53,9 +55,33 @@ int main(int, char **) {
       ++steps;
     }
 
+    if (!scene.ropes.ropeStart.empty()) {
+      size_t base  = 0;
+      Vec2   head  = scene.ropes.c_pos[base];
+      for (auto &food : scene.foodStore.foods) {
+        if (food.isEaten) continue;
+        float dx = head.x - food.position.x, dy = head.y - food.position.y;
+        if (dx*dx + dy*dy < food.radius * food.radius) {
+          food.isEaten = true;
+          int    segs  = scene.ropes.segCount[0];
+          bool   atMax = segs >= (int)MAX_SEGMENTS_PER_ROPE;
+          if (!growByLength && !atMax) {
+            addRopeSegment(scene.ropes, static_cast<RopeId>(0));
+          } else {
+            size_t cbase       = 0;
+            float  restLen     = scene.ropes.constraints[cbase].restLength;
+            float  addPerSeg   = restLen / (segs - 1);
+            for (int i = 0; i < segs - 1; ++i)
+              scene.ropes.constraints[cbase + i].restLength += addPerSeg;
+          }
+          growByLength = !growByLength;
+        }
+      }
+    }
+
     int wi, hi;
     SDL_GetWindowSize(window, &wi, &hi);
-    UpdateCamera(cam, scene.ropes, input, (float)wi, (float)hi);
+    UpdateCamera(cam, scene.ropes, input, (float)wi, (float)hi, frameTime);
 
     RenderFrame(ren, scene, cam, smoothFps);
   }

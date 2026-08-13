@@ -26,3 +26,5 @@ struct RopeStore {
 void InitRopeStore(RopeStore &store);
 RopeId SpawnRope(RopeStore &store, Vec2 origin, Vec2 target, int segments);
 void DestroyRope(RopeStore &store, RopeId rope);
+
+void addRopeSegment(RopeStore &store, RopeId rope);

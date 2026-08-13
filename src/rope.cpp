@@ -48,3 +48,25 @@ void DestroyRope(RopeStore &store, RopeId rope) {
     store.constraints[cbase + i] = RopeConstraint{0, 0, 0.0f};
   }
 }
+
+void addRopeSegment(RopeStore &store, RopeId rope) {
+  size_t base = static_cast<size_t>(rope) * MAX_SEGMENTS_PER_ROPE;
+  int segs = store.segCount[static_cast<size_t>(rope)];
+  if (segs >= MAX_SEGMENTS_PER_ROPE) return;
+
+  Vec2 lastPos = store.c_pos[base + segs - 1];
+  Vec2 secondLastPos = store.c_pos[base + segs - 2];
+  float dx = lastPos.x - secondLastPos.x;
+  float dy = lastPos.y - secondLastPos.y;
+  float segLen = std::sqrt(dx * dx + dy * dy);
+
+  store.c_pos[base + segs] = lastPos;
+  store.p_pos[base + segs] = lastPos;
+  store.invMass[base + segs] = 1.0f;
+
+  size_t cbase = static_cast<size_t>(rope) * (MAX_SEGMENTS_PER_ROPE - 1);
+  store.constraints[cbase + segs - 1] = RopeConstraint{
+      static_cast<uint32_t>(segs - 1), static_cast<uint32_t>(segs), segLen};
+
+  store.segCount[static_cast<size_t>(rope)]++;
+}

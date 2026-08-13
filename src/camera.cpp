@@ -1,8 +1,8 @@
 #include "camera.hpp"
 #include <cmath>
 
-static constexpr float CAM_POS_LERP    = 0.0003f;
-static constexpr float CAM_ZOOM_LERP   = 0.0003f;
+static constexpr float CAM_POS_RATE    = 0.6f;  // convergence rate per second
+static constexpr float CAM_ZOOM_RATE   = 0.6f;
 static constexpr float CAM_ZOOM_MARGIN = 0.50f;
 static constexpr float CAM_ZOOM_MIN    = 0.01f;
 static constexpr float CAM_ZOOM_MAX    = 0.8f;
@@ -11,7 +11,7 @@ static constexpr float CAM_DEADZONE    = 0.15f; // fraction from edge that trigg
 static constexpr float CAM_RELEASE     = 0.30f; // camera stops only once all points are this far inside
 
 void UpdateCamera(Camera &cam, const RopeStore &ropes,
-                  const InputState &input, float sw, float sh) {
+                  const InputState &input, float sw, float sh, float dt) {
   if (ropes.ropeStart.empty()) return;
   size_t base = 0;
   int    segs = ropes.segCount[0];
@@ -57,7 +57,9 @@ void UpdateCamera(Camera &cam, const RopeStore &ropes,
   else if (allInsideRel)      camActive = false;
   if (!camActive) return;
 
-  cam.pos.x += (target.x - cam.pos.x) * CAM_POS_LERP;
-  cam.pos.y += (target.y - cam.pos.y) * CAM_POS_LERP;
-  cam.zoom  += (targetZoom - cam.zoom) * CAM_ZOOM_LERP;
+  float posAlpha  = 1.0f - std::exp(-CAM_POS_RATE  * dt);
+  float zoomAlpha = 1.0f - std::exp(-CAM_ZOOM_RATE * dt);
+  cam.pos.x += (target.x - cam.pos.x) * posAlpha;
+  cam.pos.y += (target.y - cam.pos.y) * posAlpha;
+  cam.zoom  += (targetZoom - cam.zoom) * zoomAlpha;
 }
