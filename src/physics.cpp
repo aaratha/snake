@@ -26,7 +26,8 @@ consteval float cos_deg(float deg) {
 }
 
 static constexpr float MIN_BEND_COS   = cos_deg(MIN_BEND_ANGLE);
-static constexpr float CONTACT_DAMP   = 0.3f; // fraction of normal velocity removed at contacts
+static constexpr float PENALTY_STIFFNESS = 0.3f; // fraction of penetration corrected per substep (0=none, 1=hard)
+static constexpr float CONTACT_DAMP      = 0.3f; // fraction of normal velocity removed at contacts
 
 void IntegrateRopePositions(RopeStore &ropes, float /*dt*/) {
   for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
@@ -161,7 +162,7 @@ static void SolveRopeSelfCollisions(RopeStore &ropes) {
         if (dist < 1e-6f) continue;
 
         float nx = dx / dist, ny = dy / dist;
-        float C  = dist - minDist; // negative when penetrating
+        float overlap = minDist - dist; // positive when penetrating
 
         float w_ia = ropes.invMass[ia], w_ib = ropes.invMass[ib];
         float w_ja = ropes.invMass[ja], w_jb = ropes.invMass[jb];
@@ -169,7 +170,7 @@ static void SolveRopeSelfCollisions(RopeStore &ropes) {
                    + (1-t)*(1-t)*w_ja + t*t*w_jb;
         if (wEff < 1e-10f) continue;
 
-        float lambda = -C / wEff;
+        float lambda = PENALTY_STIFFNESS * overlap / wEff;
         ropes.c_pos[ia].x -= w_ia * (1-s) * lambda * nx;
         ropes.c_pos[ia].y -= w_ia * (1-s) * lambda * ny;
         ropes.c_pos[ib].x -= w_ib * s     * lambda * nx;
