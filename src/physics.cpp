@@ -4,14 +4,21 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <random>
 
 static constexpr float COMPLIANCE      = 1e-7f;
 static constexpr int   SUBSTEPS        = 16;
 static constexpr int   SUBSTEPS_REF    = 8;  // substep count at which damping constants below were tuned
-static constexpr int   PIN_DAMP_RADIUS = 3;
-static constexpr int   FREE_DAMP_RADIUS= 6;
+static constexpr int   PLAYER_GRIP_DAMP_RADIUS = 3;
+static constexpr int   PLAYER_TAIL_DAMP_RADIUS = 6;
+static constexpr int   PLAYER_HEAD_DAMP_RADIUS = 6;
+static constexpr int   ENTITY_TAIL_DAMP_RADIUS = 0;
+static constexpr int   ENTITY_HEAD_DAMP_RADIUS = 0;
 static constexpr float ROPE_RADIUS     = 6.0f;
 static constexpr int   MIN_COLL_GAP   = 5;
+static constexpr float FREE_COLL_SCALE  = 0.1f; // fraction of overlap corrected per substep for free-physics ropes
+static constexpr float FREE_HEAD_THRUST = 0.0f; // per-substep position nudge applied to the head in its facing direction
+static constexpr float FREE_HEAD_PERP   = 0.0f; // random perpendicular component added to head thrust each substep
 static constexpr float MIN_BEND_ANGLE  = 90.0f; // degrees — max allowed bend between segments
 
 consteval float cos_deg(float deg) {
@@ -48,16 +55,22 @@ consteval float scale_retention(float f) {
 consteval float scale_damp(float alpha) { return 1.0f - scale_retention(1.0f - alpha); }
 
 static constexpr float FRICTION          = scale_retention(0.99f);
-static constexpr float PIN_DAMP          = scale_damp(0.50f);  // ≈0.293 at SUBSTEPS=16
-static constexpr float FREE_DAMP         = scale_damp(0.10f);  // ≈0.051 at SUBSTEPS=16
+static constexpr float FREE_FRICTION     = 0.99f; // entity ropes retain velocity longer → more macro movement
+static constexpr float PLAYER_GRIP_DAMP  = scale_damp(0.50f);
+static constexpr float PLAYER_HEAD_DAMP  = scale_damp(0.15f);
+static constexpr float PLAYER_TAIL_DAMP  = scale_damp(0.15f);
+static constexpr float ENTITY_HEAD_DAMP  = scale_damp(0.0f);
+static constexpr float ENTITY_TAIL_DAMP  = scale_damp(0.0f);
 static constexpr float MAX_BODY_VELOCITY = 30.0f;
-static constexpr float ALIGNMENT         = scale_damp(0.10f);  // ≈0.051 at SUBSTEPS=16
-static constexpr float ANGLE_ALIGNMENT   = scale_damp(0.30f);  // ≈0.163 at SUBSTEPS=16
+static constexpr float ALIGNMENT         = scale_damp(0.05f);  // ≈0.051 at SUBSTEPS=16
+static constexpr float ANGLE_ALIGNMENT   = scale_damp(0.01f);  // ≈0.163 at SUBSTEPS=16
+
 
 void IntegrateRopePositions(RopeStore &ropes, float /*dt*/) {
   for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
     int    segs = ropes.segCount[r];
     size_t base = r * MAX_SEGMENTS_PER_ROPE;
+    float  fri  = ropes.freePhysics[r] ? FREE_FRICTION : FRICTION;
     for (int i = 0; i < segs; ++i) {
       size_t idx = base + i;
       if (ropes.invMass[idx] == 0.0f) continue;
@@ -70,8 +83,8 @@ void IntegrateRopePositions(RopeStore &ropes, float /*dt*/) {
         vel.y *= scale;
       }
       ropes.p_pos[idx] = ropes.c_pos[idx];
-      ropes.c_pos[idx].x += vel.x * FRICTION;
-      ropes.c_pos[idx].y += vel.y * FRICTION;
+      ropes.c_pos[idx].x += vel.x * fri;
+      ropes.c_pos[idx].y += vel.y * fri;
     }
   }
 }
@@ -128,6 +141,7 @@ static void ClosestSegmentPoints(Vec2 p0, Vec2 p1, Vec2 q0, Vec2 q1,
 
 static void SolveAngleConstraints(RopeStore &ropes) {
   for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
+    if (ropes.freePhysics[r]) continue;
     int    segs = ropes.segCount[r];
     size_t base = r * MAX_SEGMENTS_PER_ROPE;
 
@@ -171,20 +185,39 @@ static void SolveRopeSelfCollisions(RopeStore &ropes) {
 
   static SpatialHash sh;
   static std::vector<int> cands;
-  static uint32_t visited[MAX_SEGMENTS_PER_ROPE];
+  // visited indexed by global segment index (rope * MAX_SEGMENTS_PER_ROPE + seg)
+  static uint32_t visited[MAX_ROPES * MAX_SEGMENTS_PER_ROPE];
   static uint32_t gen = 0;
+
+  auto predPos = [&](size_t idx) -> Vec2 {
+    return {2*ropes.c_pos[idx].x - ropes.p_pos[idx].x,
+            2*ropes.c_pos[idx].y - ropes.p_pos[idx].y};
+  };
+
+  // Build hash once across all ropes; store global segment index so cross-rope
+  // pairs can be found in a single query pass.
+  sh.clear();
+  for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
+    int    segs = ropes.segCount[r];
+    size_t base = r * MAX_SEGMENTS_PER_ROPE;
+    for (int i = 0; i < segs - 1; ++i) {
+      size_t ia = base+i, ib = base+i+1;
+      Vec2 pa = predPos(ia), pb = predPos(ib);
+      float x0 = std::min({ropes.c_pos[ia].x, ropes.c_pos[ib].x, pa.x, pb.x});
+      float x1 = std::max({ropes.c_pos[ia].x, ropes.c_pos[ib].x, pa.x, pb.x});
+      float y0 = std::min({ropes.c_pos[ia].y, ropes.c_pos[ib].y, pa.y, pb.y});
+      float y1 = std::max({ropes.c_pos[ia].y, ropes.c_pos[ib].y, pa.y, pb.y});
+      int globalI = (int)(r * MAX_SEGMENTS_PER_ROPE + i);
+      for (int x = (int)std::floor(x0/CELL); x <= (int)std::floor(x1/CELL); x++)
+        for (int y = (int)std::floor(y0/CELL); y <= (int)std::floor(y1/CELL); y++)
+          sh.insert(x, y, globalI);
+    }
+  }
 
   for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
     int    segs = ropes.segCount[r];
     size_t base = r * MAX_SEGMENTS_PER_ROPE;
 
-    auto predPos = [&](size_t idx) -> Vec2 {
-      return {2*ropes.c_pos[idx].x - ropes.p_pos[idx].x,
-              2*ropes.c_pos[idx].y - ropes.p_pos[idx].y};
-    };
-
-    // Build: use union of current and predicted AABBs so fast-moving segments aren't missed
-    sh.clear();
     for (int i = 0; i < segs - 1; ++i) {
       size_t ia = base+i, ib = base+i+1;
       Vec2 pa = predPos(ia), pb = predPos(ib);
@@ -192,35 +225,33 @@ static void SolveRopeSelfCollisions(RopeStore &ropes) {
       float x1 = std::max({ropes.c_pos[ia].x, ropes.c_pos[ib].x, pa.x, pb.x});
       float y0 = std::min({ropes.c_pos[ia].y, ropes.c_pos[ib].y, pa.y, pb.y});
       float y1 = std::max({ropes.c_pos[ia].y, ropes.c_pos[ib].y, pa.y, pb.y});
-      for (int x = (int)std::floor(x0/CELL); x <= (int)std::floor(x1/CELL); x++)
-        for (int y = (int)std::floor(y0/CELL); y <= (int)std::floor(y1/CELL); y++)
-          sh.insert(x, y, i);
-    }
-
-    for (int i = 0; i < segs - 1; ++i) {
-      size_t ia = base+i, ib = base+i+1;
-      Vec2 pa = predPos(ia), pb = predPos(ib);
-      float x0 = std::min({ropes.c_pos[ia].x, ropes.c_pos[ib].x, pa.x, pb.x});
-      float x1 = std::max({ropes.c_pos[ia].x, ropes.c_pos[ib].x, pa.x, pb.x});
-      float y0 = std::min({ropes.c_pos[ia].y, ropes.c_pos[ib].y, pa.y, pb.y});
-      float y1 = std::max({ropes.c_pos[ia].y, ropes.c_pos[ib].y, pa.y, pb.y});
+      int globalI = (int)(r * MAX_SEGMENTS_PER_ROPE + i);
 
       cands.clear();
       ++gen;
       for (int x = (int)std::floor(x0/CELL)-1; x <= (int)std::floor(x1/CELL)+1; x++)
         for (int y = (int)std::floor(y0/CELL)-1; y <= (int)std::floor(y1/CELL)+1; y++)
-          sh.query(x, y, [&](int j) {
-            if (j < i + MIN_COLL_GAP) return;
-            if (visited[j] == gen)     return;
-            visited[j] = gen;
-            cands.push_back(j);
+          sh.query(x, y, [&](int globalJ) {
+            if (globalJ <= globalI) return; // process each pair once
+            if (visited[globalJ] == gen) return;
+            int rj   = globalJ / (int)MAX_SEGMENTS_PER_ROPE;
+            int segJ = globalJ % (int)MAX_SEGMENTS_PER_ROPE;
+            // same rope: free ropes use gap=2 so segments (i,i+1) and (i+2,i+3)
+            // are checked — their shared boundary nodes are within minDist at rest,
+            // creating the constant constraint-vs-collision fight that drives the fractal
+            int gap = ropes.freePhysics[r] ? 2 : MIN_COLL_GAP;
+            if ((size_t)rj == r && segJ < i + gap) return;
+            visited[globalJ] = gen;
+            cands.push_back(globalJ);
           });
 
-      for (int j : cands) {
-        if (j >= segs - 1) continue;
-        size_t ja = base+j, jb = base+j+1;
+      for (int globalJ : cands) {
+        int    rj   = globalJ / (int)MAX_SEGMENTS_PER_ROPE;
+        int    segJ = globalJ % (int)MAX_SEGMENTS_PER_ROPE;
+        size_t base2 = (size_t)rj * MAX_SEGMENTS_PER_ROPE;
+        if (segJ >= ropes.segCount[rj] - 1) continue;
+        size_t ja = base2+segJ, jb = base2+segJ+1;
 
-        // Narrowphase on predicted positions
         Vec2 p_ia = predPos(ia), p_ib = predPos(ib);
         Vec2 p_ja = predPos(ja), p_jb = predPos(jb);
 
@@ -244,47 +275,56 @@ static void SolveRopeSelfCollisions(RopeStore &ropes) {
                    + (1-t)*(1-t)*w_ja + t*t*w_jb;
         if (wEff < 1e-10f) continue;
 
-        // Closing velocity at predicted contact points (positive = approaching)
-        auto vn = [&](size_t idx) {
-          return (ropes.c_pos[idx].x - ropes.p_pos[idx].x)*nx
-               + (ropes.c_pos[idx].y - ropes.p_pos[idx].y)*ny;
-        };
-        float v_rel = (1-s)*vn(ia) + s*vn(ib) - (1-t)*vn(ja) - t*vn(jb);
+        bool freePair = ropes.freePhysics[r] || ropes.freePhysics[(size_t)rj];
+        if (freePair) {
+          // Full overlap displacement on current positions, no velocity correction.
+          // Matches ea5bdfc — lets constraint and collision fight each other each substep,
+          // producing the emergent fractal oscillation.
+          float cur_c1x = ropes.c_pos[ia].x + s*(ropes.c_pos[ib].x - ropes.c_pos[ia].x);
+          float cur_c1y = ropes.c_pos[ia].y + s*(ropes.c_pos[ib].y - ropes.c_pos[ia].y);
+          float cur_c2x = ropes.c_pos[ja].x + t*(ropes.c_pos[jb].x - ropes.c_pos[ja].x);
+          float cur_c2y = ropes.c_pos[ja].y + t*(ropes.c_pos[jb].y - ropes.c_pos[ja].y);
+          float cur_dx = cur_c2x - cur_c1x, cur_dy = cur_c2y - cur_c1y;
+          float cur_dist2 = cur_dx*cur_dx + cur_dy*cur_dy;
+          if (cur_dist2 >= minDist2) continue;
+          float cur_dist = std::sqrt(cur_dist2);
+          if (cur_dist < 1e-6f) continue;
+          float snx = cur_dx/cur_dist, sny = cur_dy/cur_dist;
+          float lam = (minDist - cur_dist) / wEff * FREE_COLL_SCALE;
+          ropes.c_pos[ia].x -= w_ia*(1-s)*lam*snx; ropes.c_pos[ia].y -= w_ia*(1-s)*lam*sny;
+          ropes.c_pos[ib].x -= w_ib*s    *lam*snx; ropes.c_pos[ib].y -= w_ib*s    *lam*sny;
+          ropes.c_pos[ja].x += w_ja*(1-t)*lam*snx; ropes.c_pos[ja].y += w_ja*(1-t)*lam*sny;
+          ropes.c_pos[jb].x += w_jb*t    *lam*snx; ropes.c_pos[jb].y += w_jb*t    *lam*sny;
+        } else {
+          // Hard speculative correction for player-only rope pairs.
+          auto vn = [&](size_t idx) {
+            return (ropes.c_pos[idx].x - ropes.p_pos[idx].x)*nx
+                 + (ropes.c_pos[idx].y - ropes.p_pos[idx].y)*ny;
+          };
+          float v_rel = (1-s)*vn(ia) + s*vn(ib) - (1-t)*vn(ja) - t*vn(jb);
+          float vel_lambda = std::max(0.0f, v_rel) / wEff;
 
-        // Velocity correction: zero when separating (false positive filter)
-        float vel_lambda = std::max(0.0f, v_rel) / wEff;
+          float cur_c1x = ropes.c_pos[ia].x + s*(ropes.c_pos[ib].x - ropes.c_pos[ia].x);
+          float cur_c1y = ropes.c_pos[ia].y + s*(ropes.c_pos[ib].y - ropes.c_pos[ia].y);
+          float cur_c2x = ropes.c_pos[ja].x + t*(ropes.c_pos[jb].x - ropes.c_pos[ja].x);
+          float cur_c2y = ropes.c_pos[ja].y + t*(ropes.c_pos[jb].y - ropes.c_pos[ja].y);
+          float cur_dx = cur_c2x - cur_c1x, cur_dy = cur_c2y - cur_c1y;
+          float cur_dist2 = cur_dx*cur_dx + cur_dy*cur_dy;
+          float pos_lambda = cur_dist2 < minDist2
+              ? (minDist - std::sqrt(cur_dist2)) / wEff : 0.0f;
 
-        // Position correction: push out current overlap immediately
-        float cur_c1x = ropes.c_pos[ia].x + s*(ropes.c_pos[ib].x - ropes.c_pos[ia].x);
-        float cur_c1y = ropes.c_pos[ia].y + s*(ropes.c_pos[ib].y - ropes.c_pos[ia].y);
-        float cur_c2x = ropes.c_pos[ja].x + t*(ropes.c_pos[jb].x - ropes.c_pos[ja].x);
-        float cur_c2y = ropes.c_pos[ja].y + t*(ropes.c_pos[jb].y - ropes.c_pos[ja].y);
-        float cur_dx = cur_c2x - cur_c1x, cur_dy = cur_c2y - cur_c1y;
-        float cur_dist2 = cur_dx*cur_dx + cur_dy*cur_dy;
-        float pos_lambda = cur_dist2 < minDist2
-            ? (minDist - std::sqrt(cur_dist2)) / wEff
-            : 0.0f;
-
-        if (pos_lambda > 0.0f) {
-          ropes.c_pos[ia].x -= w_ia*(1-s)*pos_lambda*nx;
-          ropes.c_pos[ia].y -= w_ia*(1-s)*pos_lambda*ny;
-          ropes.c_pos[ib].x -= w_ib*s    *pos_lambda*nx;
-          ropes.c_pos[ib].y -= w_ib*s    *pos_lambda*ny;
-          ropes.c_pos[ja].x += w_ja*(1-t)*pos_lambda*nx;
-          ropes.c_pos[ja].y += w_ja*(1-t)*pos_lambda*ny;
-          ropes.c_pos[jb].x += w_jb*t    *pos_lambda*nx;
-          ropes.c_pos[jb].y += w_jb*t    *pos_lambda*ny;
-        }
-
-        if (vel_lambda > 0.0f) {
-          ropes.p_pos[ia].x += w_ia*(1-s)*vel_lambda*nx;
-          ropes.p_pos[ia].y += w_ia*(1-s)*vel_lambda*ny;
-          ropes.p_pos[ib].x += w_ib*s    *vel_lambda*nx;
-          ropes.p_pos[ib].y += w_ib*s    *vel_lambda*ny;
-          ropes.p_pos[ja].x -= w_ja*(1-t)*vel_lambda*nx;
-          ropes.p_pos[ja].y -= w_ja*(1-t)*vel_lambda*ny;
-          ropes.p_pos[jb].x -= w_jb*t    *vel_lambda*nx;
-          ropes.p_pos[jb].y -= w_jb*t    *vel_lambda*ny;
+          if (pos_lambda > 0.0f) {
+            ropes.c_pos[ia].x -= w_ia*(1-s)*pos_lambda*nx; ropes.c_pos[ia].y -= w_ia*(1-s)*pos_lambda*ny;
+            ropes.c_pos[ib].x -= w_ib*s    *pos_lambda*nx; ropes.c_pos[ib].y -= w_ib*s    *pos_lambda*ny;
+            ropes.c_pos[ja].x += w_ja*(1-t)*pos_lambda*nx; ropes.c_pos[ja].y += w_ja*(1-t)*pos_lambda*ny;
+            ropes.c_pos[jb].x += w_jb*t    *pos_lambda*nx; ropes.c_pos[jb].y += w_jb*t    *pos_lambda*ny;
+          }
+          if (vel_lambda > 0.0f) {
+            ropes.p_pos[ia].x += w_ia*(1-s)*vel_lambda*nx; ropes.p_pos[ia].y += w_ia*(1-s)*vel_lambda*ny;
+            ropes.p_pos[ib].x += w_ib*s    *vel_lambda*nx; ropes.p_pos[ib].y += w_ib*s    *vel_lambda*ny;
+            ropes.p_pos[ja].x -= w_ja*(1-t)*vel_lambda*nx; ropes.p_pos[ja].y -= w_ja*(1-t)*vel_lambda*ny;
+            ropes.p_pos[jb].x -= w_jb*t    *vel_lambda*nx; ropes.p_pos[jb].y -= w_jb*t    *vel_lambda*ny;
+          }
         }
       }
     }
@@ -346,6 +386,7 @@ static void AlignAngularVelocities(RopeStore &ropes) {
   Vec2 vBend[MAX_SEGMENTS_PER_ROPE];
 
   for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
+    if (ropes.freePhysics[r]) continue;
     int    segs = ropes.segCount[r];
     size_t base = r * MAX_SEGMENTS_PER_ROPE;
 
@@ -417,34 +458,54 @@ void StepPhysics(Scene &scene, float dt) {
       int    segs = ropes.segCount[r];
       size_t base = r * MAX_SEGMENTS_PER_ROPE;
 
+      int   tailRadius = ropes.freePhysics[r] ? ENTITY_TAIL_DAMP_RADIUS : PLAYER_TAIL_DAMP_RADIUS;
+      int   headRadius = ropes.freePhysics[r] ? ENTITY_HEAD_DAMP_RADIUS : PLAYER_HEAD_DAMP_RADIUS;
+      float tailDamp   = ropes.freePhysics[r] ? ENTITY_TAIL_DAMP : PLAYER_TAIL_DAMP;
+      float headDamp   = ropes.freePhysics[r] ? ENTITY_HEAD_DAMP : PLAYER_HEAD_DAMP;
+      auto dampEnd = [&](int endpoint, int radius, float damp) {
+        int lo = (endpoint == 0) ? 0 : std::max(0, segs - 1 - radius);
+        int hi = (endpoint == 0) ? std::min(segs - 1, radius) : segs - 1;
+        for (int j = lo; j <= hi; ++j) {
+          ropes.p_pos[base+j].x += (ropes.c_pos[base+j].x - ropes.p_pos[base+j].x) * damp;
+          ropes.p_pos[base+j].y += (ropes.c_pos[base+j].y - ropes.p_pos[base+j].y) * damp;
+        }
+      };
+      dampEnd(0,        tailRadius, tailDamp);
+      dampEnd(segs - 1, headRadius, headDamp);
+
+      if (ropes.freePhysics[r]) {
+        if (segs >= 2) {
+          static std::mt19937 rng{std::random_device{}()};
+          static std::uniform_real_distribution<float> perp_dist(-1.0f, 1.0f);
+          size_t head = base + segs - 1, neck = base + segs - 2;
+          float dx = ropes.c_pos[head].x - ropes.c_pos[neck].x;
+          float dy = ropes.c_pos[head].y - ropes.c_pos[neck].y;
+          float len = std::sqrt(dx*dx + dy*dy);
+          if (len > 1e-6f) {
+            float nx = dx/len, ny = dy/len;
+            float perp = perp_dist(rng) * FREE_HEAD_PERP;
+            ropes.c_pos[head].x += nx * FREE_HEAD_THRUST + (-ny) * perp;
+            ropes.c_pos[head].y += ny * FREE_HEAD_THRUST + ( nx) * perp;
+          }
+        }
+        continue;
+      }
+
       // damp velocity near pinned points; pin itself is fully zeroed, neighbours get a
       // small per-substep fraction that falls off linearly — keeps the gradient real
       // across all 8 substeps rather than collapsing to zero at every boundary
       for (int i = 0; i < segs; ++i) {
         if (ropes.invMass[base + i] != 0.0f) continue;
         ropes.p_pos[base + i] = ropes.c_pos[base + i]; // pin: full zero
-        int lo = std::max(0, i - PIN_DAMP_RADIUS);
-        int hi = std::min(segs - 1, i + PIN_DAMP_RADIUS);
+        int lo = std::max(0, i - PLAYER_GRIP_DAMP_RADIUS);
+        int hi = std::min(segs - 1, i + PLAYER_GRIP_DAMP_RADIUS);
         for (int j = lo; j <= hi; ++j) {
           if (j == i) continue;
-          float t = PIN_DAMP * (1.0f - (float)std::abs(j - i) / (PIN_DAMP_RADIUS + 1.0f));
+          float t = PLAYER_GRIP_DAMP * (1.0f - (float)std::abs(j - i) / (PLAYER_GRIP_DAMP_RADIUS + 1.0f));
           ropes.p_pos[base+j].x += (ropes.c_pos[base+j].x - ropes.p_pos[base+j].x) * t;
           ropes.p_pos[base+j].y += (ropes.c_pos[base+j].y - ropes.p_pos[base+j].y) * t;
         }
       }
-
-      // bleed velocity near each endpoint — apply even when pinned so fast turns
-      // don't leave segments 4-6 completely undamped on the dragged-head side
-      auto dampEnd = [&](int endpoint) {
-        int lo = (endpoint == 0) ? 0 : std::max(0, segs - 1 - FREE_DAMP_RADIUS);
-        int hi = (endpoint == 0) ? std::min(segs - 1, FREE_DAMP_RADIUS) : segs - 1;
-        for (int j = lo; j <= hi; ++j) {
-          ropes.p_pos[base+j].x += (ropes.c_pos[base+j].x - ropes.p_pos[base+j].x) * FREE_DAMP;
-          ropes.p_pos[base+j].y += (ropes.c_pos[base+j].y - ropes.p_pos[base+j].y) * FREE_DAMP;
-        }
-      };
-      dampEnd(0);
-      dampEnd(segs - 1);
     }
   }
 }

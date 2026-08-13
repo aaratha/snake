@@ -23,6 +23,7 @@ struct RopeStore {
     std::vector<RopeConstraint> constraints;
     std::vector<uint32_t> ropeStart; // ropeStart[r] == r (rope index)
     std::vector<int> segCount;       // active segment count per rope
+    std::vector<bool> freePhysics;   // skip stabilization passes — enables emergent collision behavior
 };
 
 void InitRopeStore(RopeStore &store);

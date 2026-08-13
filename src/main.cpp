@@ -2,6 +2,7 @@
 #include <chrono>
 
 #include "camera.hpp"
+#include "entity.hpp"
 #include "food.hpp"
 #include "input.hpp"
 #include "physics.hpp"
@@ -31,7 +32,8 @@ int main(int, char **) {
   Camera     cam{{0.0f, 0.0f}, 1.0f};
   InputState input;
 
-  SpawnRope(scene.ropes, {-500.0f, 0.0f}, {500.0f, 0.0f}, 64);
+  SpawnRope(scene.ropes, {-200.0f, 0.0f}, {200.0f, 0.0f}, 64);
+  SpawnRopeEnemy(scene.entities, scene.ropes, {-200.0f, 300.0f}, {200.0f, 300.0f}, 64);
 
   scene.rigidBodies.bodies.push_back(MakeCircle({-200.0f, 200.0f},
                                                 {0.0f, 0.0f}, 40.0f));

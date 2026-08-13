@@ -14,6 +14,7 @@ RopeId SpawnRope(RopeStore &store, Vec2 origin, Vec2 target, int segments) {
   RopeId ropeId = static_cast<RopeId>(store.ropeStart.size());
   store.ropeStart.push_back(static_cast<uint32_t>(ropeId));
   store.segCount.push_back(segments);
+  store.freePhysics.push_back(false);
 
   size_t base = static_cast<size_t>(ropeId) * MAX_SEGMENTS_PER_ROPE;
   for (int i = 0; i < segments; ++i) {
