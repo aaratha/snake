@@ -62,8 +62,11 @@ static constexpr float PLAYER_TAIL_DAMP  = scale_damp(0.15f);
 static constexpr float ENTITY_HEAD_DAMP  = scale_damp(0.0f);
 static constexpr float ENTITY_TAIL_DAMP  = scale_damp(0.0f);
 static constexpr float MAX_BODY_VELOCITY = 30.0f;
-static constexpr float ALIGNMENT         = scale_damp(0.05f);  // ≈0.051 at SUBSTEPS=16
-static constexpr float ANGLE_ALIGNMENT   = scale_damp(0.01f);  // ≈0.163 at SUBSTEPS=16
+static constexpr float PLAYER_COLL_STIFFNESS = 0.5f; // fraction of overlap corrected per substep (1.0 = hard push-out, lower = soft penalty)
+static constexpr float PLAYER_COLL_DAMPING   = 0.5f; // fraction of closing velocity removed on self-collision
+static constexpr float ALIGNMENT           = scale_damp(0.10f);
+static constexpr float ENTITY_ALIGNMENT  = scale_damp(0.05f);
+static constexpr float ANGLE_ALIGNMENT   = scale_damp(0.30f);
 
 
 void IntegrateRopePositions(RopeStore &ropes, float /*dt*/) {
@@ -302,7 +305,7 @@ static void SolveRopeSelfCollisions(RopeStore &ropes) {
                  + (ropes.c_pos[idx].y - ropes.p_pos[idx].y)*ny;
           };
           float v_rel = (1-s)*vn(ia) + s*vn(ib) - (1-t)*vn(ja) - t*vn(jb);
-          float vel_lambda = std::max(0.0f, v_rel) / wEff;
+          float vel_lambda = std::max(0.0f, v_rel) / wEff * PLAYER_COLL_DAMPING;
 
           float cur_c1x = ropes.c_pos[ia].x + s*(ropes.c_pos[ib].x - ropes.c_pos[ia].x);
           float cur_c1y = ropes.c_pos[ia].y + s*(ropes.c_pos[ib].y - ropes.c_pos[ia].y);
@@ -311,7 +314,7 @@ static void SolveRopeSelfCollisions(RopeStore &ropes) {
           float cur_dx = cur_c2x - cur_c1x, cur_dy = cur_c2y - cur_c1y;
           float cur_dist2 = cur_dx*cur_dx + cur_dy*cur_dy;
           float pos_lambda = cur_dist2 < minDist2
-              ? (minDist - std::sqrt(cur_dist2)) / wEff : 0.0f;
+              ? (minDist - std::sqrt(cur_dist2)) / wEff * PLAYER_COLL_STIFFNESS : 0.0f;
 
           if (pos_lambda > 0.0f) {
             ropes.c_pos[ia].x -= w_ia*(1-s)*pos_lambda*nx; ropes.c_pos[ia].y -= w_ia*(1-s)*pos_lambda*ny;
@@ -359,6 +362,7 @@ static void AlignVelocities(RopeStore &ropes) {
   for (size_t r = 0; r < ropes.ropeStart.size(); ++r) {
     int    segs = ropes.segCount[r];
     size_t base = r * MAX_SEGMENTS_PER_ROPE;
+    float  align = ropes.freePhysics[r] ? ENTITY_ALIGNMENT : ALIGNMENT;
 
     for (int i = 0; i < segs; ++i) {
       size_t idx = base + i;
@@ -376,8 +380,8 @@ static void AlignVelocities(RopeStore &ropes) {
       if (cnt == 0) continue;
       avg.x /= cnt; avg.y /= cnt;
 
-      ropes.p_pos[base+i].x = ropes.c_pos[base+i].x - (vel[i].x + (avg.x - vel[i].x) * ALIGNMENT);
-      ropes.p_pos[base+i].y = ropes.c_pos[base+i].y - (vel[i].y + (avg.y - vel[i].y) * ALIGNMENT);
+      ropes.p_pos[base+i].x = ropes.c_pos[base+i].x - (vel[i].x + (avg.x - vel[i].x) * align);
+      ropes.p_pos[base+i].y = ropes.c_pos[base+i].y - (vel[i].y + (avg.y - vel[i].y) * align);
     }
   }
 }
